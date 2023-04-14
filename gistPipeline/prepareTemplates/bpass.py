@@ -8,22 +8,19 @@ from printStatus import printStatus
 
 from ppxf.ppxf_util import log_rebin, gaussian_filter1d
 
+#BPASS age range, nothing older than 12.59Gyr
+logAgesAll = np.arange(6,11+0.1,0.1)
+agesFlags = (logAgesAll<=10.2)
 
 
-
-listAge = np.array([7.4,7.6,7.8,8,9.2,9.5,9.7,9.9,10.2])
-listMetal = np.array([1.e-3,6.e-3,1.4e-2,4.e-2])
+### USED TO SET THE DESIRED AGES, METALLICITIES, AND ALPHAS
+#Default values
+listLogAge = logAgesAll[0::2]										#0.2dex age steps 1.25 Myr -> 15.84 Gyr
+listMetal = np.array([1.e-4,1.e-3,2.e-3,4.e-3,8.e-3,1.4e-2,2.e-2,4.e-2])
 listAlpha = np.array([0.])
 
-
-
-
-# timeSteps = np.sum([np.isclose(agesAll,aa) for aa in agesList],axis=0,dtype=bool) * agesFlags 
-# refs = np.sum([np.isclose(Zs,zz) for zz in zList],axis=0,dtype=bool)
-# files = files[refs]
-# Zs = Zs[refs]
-# alphas = alphas[refs]
-# ages = agesAll[timeSteps]
+#Needed by both functions to select ages
+logAgeSteps = np.sum([np.isclose(logAgesAll,aa) for aa in listLogAge],axis=0,dtype=bool)* agesFlags 
 
 
 def age_metal_alpha(passedFiles):
@@ -56,20 +53,26 @@ def age_metal_alpha(passedFiles):
 			Metal[ff] = 1.*10**(-1*float(z))
 		else:
 			Metal[ff] = 1.e-3 * float(z)
+	
+	logAge = logAgesAll[logAgeSteps] -9
 
-	Age = np.arange(6,11+0.1,0.1)
-	Metal = np.unique(Metal)
-	Alpha = np.unique(Alpha)
-	metal_str = np.unique(metal_str)
-	alpha_str = np.unique(alpha_str)
+	metalSteps = np.sum([np.isclose(Metal,zz) for zz in listMetal],axis=0,dtype=bool)
+	Metal, indMetal = np.unique(Metal[metalSteps],return_index=True)
+	metal_str = metal_str[metalSteps][indMetal]
 
-	nAges = len(Age)
+	alphaSteps = np.sum([np.isclose(Alpha,zz) for zz in listAlpha],axis=0,dtype=bool)
+	Alpha, indAlpha = np.unique(Alpha[alphaSteps],return_index=True)
+	alpha_str = alpha_str[alphaSteps][indAlpha]
+
+
+	nAges = len(logAge)
 	nMetal = len(Metal)
 	nAlpha = len(Alpha)
 	ncomb = nAges*nMetal*nAlpha
 
 
-	return(Age, Metal, Alpha, metal_str, alpha_str, nAges, nMetal, nAlpha, ncomb)
+
+	return(logAge, Metal, Alpha, metal_str, alpha_str, nAges, nMetal, nAlpha, ncomb)
 
 
 
@@ -89,7 +92,6 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
 
 
 	sp_models.sort()
-	ntemplates = 51*len(sp_models)
 
 	# Read data
 	ssp 		   = np.loadtxt(sp_models[0])
@@ -134,17 +136,32 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
 	# Create an array to store the templates
 	sspNew, _, _ = log_rebin(lamRange_spmod, ssp_data, velscale=velscale)
 
+	# Extract ages, metallicities and alpha from the templates
+	# ABW done in all to allow for BPASS Z,age,alpha selection
+	logAge, metal, alpha, metal_str, alpha_str, nAges, nMetal, nAlpha, ncomb = age_metal_alpha(sp_models)
+	
+	# exit()
+
+	ntemplates = nAges*len(sp_models)
+
 	# Do NOT sort the templates in any way
 	if sortInGrid == False:
 
 		# Load templates, convolve and log-rebin them
 		templates = np.empty((sspNew.size, ntemplates))
-		for j, file in enumerate(sp_models):
-			ssp_data = np.loadtxt(file)[idx_lam,1:]
-
-			for s in range(ssp_data.shape[1]):
-				ssp_data[:,s] = gaussian_filter1d(ssp_data[:,s], sigma)
-				templates[:, 51*j + s], logLam_spmod, _ = log_rebin(lamRange_spmod, ssp_data[:,s], velscale=velscale)
+		# Sort the templates in the cube of age, metal, alpha
+		# This sorts for alpha
+		for i, a in enumerate(alpha_str):
+			# This sorts for metals
+			for k, mh in enumerate(metal_str):
+				files = [s for s in sp_models if (mh in s and a in s)]
+				# This sorts for ages
+				for j, filename in enumerate(files):
+					ssp_data = (np.loadtxt(filename)[idx_lam,1:])[:,logAgeSteps]
+					for s in range(ssp_data.shape[1]):
+						# ssp_data[:,s] = gaussian_filter1d(ssp_data[:,s], sigma)
+						# sspNew, logLam2, _ = log_rebin(lamRange_spmod, ssp_data[:,s], velscale=velscale)
+						templates[:, nAges*j + s], logLam_spmod, _ = log_rebin(lamRange_spmod, ssp_data[:,s], velscale=velscale)
 
 		# Normalise templates in such a way to get mass-weighted results
 		if config[module_used]['NORM_TEMP'] == 'MASS':
@@ -164,9 +181,6 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
 	# Sort the templates in a cube of age, metal, alpha for the SFH module
 	elif sortInGrid == True:
 
-		# Extract ages, metallicities and alpha from the templates
-		logAge, metal, alpha, metal_str, alpha_str, nAges, nMetal, nAlpha, ncomb = age_metal_alpha(sp_models)
-
 		templates          = np.zeros((sspNew.size, nAges, nMetal, nAlpha))
 		templates[:,:,:,:] = np.nan
 
@@ -184,7 +198,7 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
 				files = [s for s in sp_models if (mh in s and a in s)]
 				# This sorts for ages
 				for j, filename in enumerate(files):
-					ssp_data = np.loadtxt(filename)[idx_lam,1:]
+					ssp_data = (np.loadtxt(filename)[idx_lam,1:])[:,logAgeSteps]
 					for s in range(ssp_data.shape[1]):
 						ssp_data[:,s] = gaussian_filter1d(ssp_data[:,s], sigma)
 						sspNew, logLam2, _ = log_rebin(lamRange_spmod, ssp_data[:,s], velscale=velscale)
@@ -195,9 +209,9 @@ def prepareSpectralTemplateLibrary(config, lmin, lmax, velscale, LSF_Data, LSF_T
 
 						# Normalise templates for light-weighted results
 						if config[module_used]['NORM_TEMP'] == 'LIGHT':
-							templates[:, 51*j+s, k, i] = sspNew / np.mean(sspNew)
+							templates[:, nAges*j+s, k, i] = sspNew / np.mean(sspNew)
 						else:
-							templates[:, 51*j+s, k, i] = sspNew
+							templates[:, nAges*j+s, k, i] = sspNew
 
 		# Normalise templates for mass-weighted results
 		if config[module_used]['NORM_TEMP'] == 'MASS':

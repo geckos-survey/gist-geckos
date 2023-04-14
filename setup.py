@@ -41,7 +41,7 @@ setup(name='gistPipeline',
         'printStatus>=1.0',
         'multiprocess>=0.5'
       ],
-      python_requires='>=3.11*',
+      python_requires='>=3.11',
       entry_points={
         'console_scripts': [
             'gistPipeline        = gistPipeline.MainPipeline:main'
