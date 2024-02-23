@@ -2,12 +2,10 @@ import logging
 import os
 import time
 
+import h5py
 import numpy as np
 from astropy.io import ascii, fits
-from multiprocess import Process, Queue
-# Then use system installed version instead
-# import ppxf
-# print(ppxf.__version__)
+from joblib import Parallel, delayed, dump, load
 from ppxf.ppxf_util import gaussian_filter1d
 from printStatus import printStatus
 
@@ -28,71 +26,6 @@ PURPOSE:
   algorithm of Martin-Navaroo et al. 2018
   (ui.adsabs.harvard.edu/#abs/2018MNRAS.475.3700M).
 """
-
-
-def workerLS(inQueue, outQueue):
-    """
-    Defines the worker process of the parallelisation with multiprocessing.Queue
-    and multiprocessing.Process.
-    """
-    for (
-        wave,
-        spec,
-        espec,
-        redshift,
-        config,
-        lickfile,
-        names,
-        index_names,
-        model_indices,
-        params,
-        tri,
-        labels,
-        nbins,
-        i,
-        MCMC,
-    ) in iter(inQueue.get, "STOP"):
-        if MCMC == True:
-            indices, errors, vals, percentile = run_ls(
-                wave,
-                spec,
-                espec,
-                redshift,
-                config,
-                lickfile,
-                names,
-                index_names,
-                model_indices,
-                params,
-                tri,
-                labels,
-                nbins,
-                i,
-                MCMC,
-            )
-
-            outQueue.put((i, indices, errors, vals, percentile))
-
-        elif MCMC == False:
-            indices, errors = run_ls(
-                wave,
-                spec,
-                espec,
-                redshift,
-                config,
-                lickfile,
-                names,
-                index_names,
-                model_indices,
-                params,
-                tri,
-                labels,
-                nbins,
-                i,
-                MCMC,
-            )
-
-            outQueue.put((i, indices, errors))
 
 
 def run_ls(
@@ -118,7 +51,28 @@ def run_ls(
     and if required, the MCMC algorithm from Martin-Navaroo et al. 2018
     (ui.adsabs.harvard.edu/#abs/2018MNRAS.475.3700M) to determine SSP
     properties.
+
+    Args:
+    wave (array): Wavelength data
+    spec (array): Spectral data
+    espec (array): Error spectral data
+    redshift (array): Redshift data
+    config (dict): Configuration data
+    lickfile (str): Lick index file
+    names (array): Index names
+    index_names (array): Names of the indices in consideration
+    model_indices (array): Model indices
+    params (array): Parameters
+    tri (array): Triangulation data
+    labels (array): Labels data
+    nbins (int): Number of bins
+    i (int): Iteration number
+    MCMC (bool): Flag for using MCMC algorithm
+
+    Returns:
+    tuple: A tuple of indices, errors, vals, and percentiles
     """
+    # Display progress bar
     printStatus.progressBar(i, nbins, barLength=50)
     nindex = len(index_names)
 
@@ -362,6 +316,13 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     convolved to meet the LIS measurement resolution. After the measurement of
     line strength indices and, if required, the estimation of SSP properties,
     the results are saved to file.
+
+    Args:
+        config (dict): Configuration parameters for the line strength analysis.
+        RESOLUTION (str, optional): Resolution type. Defaults to "ORIGINAL".
+
+    Returns:
+        None
     """
     # Run MCMC only on the indices measured from convoluted spectra
     if config["LS"]["TYPE"] == "SPP" and RESOLUTION == "ADAPTED":
@@ -372,55 +333,34 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     # Read LSF information
     LSF_Data, LSF_Templates = _auxiliary.getLSF(config, "LS")
 
-    # Read the log-rebinned spectra and log-unbin them
-    if (
-        os.path.isfile(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_ls-cleaned_linear.fits"
-        )
-        == False
-    ):
-        # Read spectra
-        if (
-            os.path.isfile(
-                os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-                + "_gas-cleaned_BIN.fits"
-            )
-            == True
-        ):
-            logging.info(
-                "Using emission-subtracted spectra at "
-                + os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-                + "_gas-cleaned_BIN.fits"
-            )
-            printStatus.done("Using emission-subtracted spectra")
-            hdu_spec = fits.open(
-                os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-                + "_gas-cleaned_BIN.fits"
-            )
+    # Define file paths
+    output_dir = config["GENERAL"]["OUTPUT"]
+    run_id = config["GENERAL"]["RUN_ID"]
+    gas_cleaned_file = os.path.join(output_dir, f"{run_id}_gas-cleaned_BIN.fits")
+    bin_spectra_file = os.path.join(output_dir, f"{run_id}_BinSpectra.hdf5")
+    ls_cleaned_file = os.path.join(output_dir, f"{run_id}_ls-cleaned_linear.fits")
+
+    # Check if ls-cleaned file exists
+    if not os.path.isfile(ls_cleaned_file):
+        # Check if emission-subtracted spectra file exists
+        if os.path.isfile(gas_cleaned_file):
+            logging.info(f"Using emission-subtracted spectra at {gas_cleaned_file}")
+            hdu_spec = fits.open(gas_cleaned_file, mem_map=True)
+            spec_data = hdu_spec[1].data.SPEC
+            espec_data = hdu_spec[1].data.ESPEC
+            logLam = hdu_spec[2].data.LOGLAM
         else:
-            logging.info(
-                "Using regular spectra without any emission-correction at "
-                + os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-                + "_BinSpectra.fits"
-            )
-            printStatus.done("Using regular spectra without any emission-correction")
-            hdu_spec = fits.open(
-                os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-                + "_BinSpectra.fits"
-            )
-        hdu_espec = fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_BinSpectra.fits"
-        )
-        idx_lamMin = np.where(hdu_spec[2].data.LOGLAM[0] == hdu_espec[2].data.LOGLAM)[0]
-        idx_lamMax = np.where(hdu_spec[2].data.LOGLAM[-1] == hdu_espec[2].data.LOGLAM)[
-            0
-        ]
-        idx_lam = np.arange(idx_lamMin, idx_lamMax + 1)
-        oldspec = np.array(hdu_spec[1].data.SPEC)
-        oldespec = np.sqrt(np.array(hdu_espec[1].data.ESPEC)[:, idx_lam])
-        wave = np.array(hdu_spec[2].data.LOGLAM)
+            logging.info(f"Using regular spectra without any emission-correction at {bin_spectra_file}")
+            with h5py.File(bin_spectra_file, 'r') as f:
+                spec_data = f['SPEC'][:]
+                logLam = f['LOGLAM'][:]
+                espec_data = f['ESPEC'][:]
+
+        idx_lam = np.arange(np.argmin(logLam), np.argmax(logLam) + 1)
+
+        oldspec = spec_data
+        oldespec = espec_data[:, idx_lam]
+        wave = logLam
 
         nbins = oldspec.shape[0]
         npix = oldspec.shape[1]
@@ -452,24 +392,17 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
 
     # Read the linearly-binned, cleaned spectra provided by previous LS-run
     else:
-        logging.info(
-            "Reading "
-            + os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_ls-cleaned_linear.fits"
-        )
-        hdu = fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_ls-cleaned_linear.fits"
-        )
-        spec = np.array(hdu[1].data.SPEC)
-        espec = np.array(hdu[1].data.ESPEC)
-        wave = np.array(hdu[2].data.LAM)
-        nbins = spec.shape[0]
+        logging.info(f"Reading {ls_cleaned_file}")
+        with fits.open(ls_cleaned_file, mem_map=True) as hdu:
+            spec = hdu[1].data.SPEC
+            espec = hdu[1].data.ESPEC
+            wave = hdu[2].data.LAM
+            nbins = spec.shape[0]
 
     # Read PPXF results
     ppxf_data = fits.open(
         os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-        + "_kin.fits"
+        + "_kin.fits", mem_map=True
     )[1].data
     redshift = np.zeros((nbins, 2))  # Dimensionless z
     redshift[:, 0] = np.array(ppxf_data.V[:]) / cvel  # Redshift
@@ -487,10 +420,10 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
     # Broaden spectra to LIS resolution taking into account the measured velocity dispersion
     if RESOLUTION == "ADAPTED":
         printStatus.running("Broadening the spectra to LIS resolution")
-        velscale = fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_BinSpectra.fits"
-        )[0].header["VELSCALE"]
+        # Open the HDF5 file
+        with h5py.File(os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_BinSpectra.hdf5", 'r') as f:
+            # Read the VELSCALE attribute from the file
+            velscale = f.attrs['VELSCALE']
         # Iterate over all bins
         for i in range(0, spec.shape[0]):
             printStatus.progressBar(i, nbins, barLength=50)
@@ -547,24 +480,20 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
         printStatus.running("Running lineStrengths in parallel mode")
         logging.info("Running lineStrengths in parallel mode")
 
-        # Create Queues
-        inQueue = Queue()
-        outQueue = Queue()
+        # Define a function to encapsulate the work done in the loop
+        def worker(chunk):
+            """
+            Apply run_ls() to a chunk of data and return the results.
 
-        # Create worker processes
-        ps = [
-            Process(target=workerLS, args=(inQueue, outQueue))
-            for _ in range(config["GENERAL"]["NCPU"])
-        ]
+            Args:
+                chunk (list): A list of indices representing the data chunk to process.
 
-        # Start worker processes
-        for p in ps:
-            p.start()
-
-        # Fill the queue
-        for i in range(nbins):
-            inQueue.put(
-                (
+            Returns:
+                list: A list of results obtained from processing the chunk.
+            """
+            results = []
+            for i in chunk:
+                result = run_ls(
                     wave,
                     spec[i, :],
                     espec[i, :],
@@ -581,37 +510,27 @@ def measureLineStrengths(config, RESOLUTION="ORIGINAL"):
                     i,
                     MCMC,
                 )
-            )
+                results.append(result)
+            return results
 
-        # now get the results with indices
-        ls_tmp = [outQueue.get() for _ in range(nbins)]
+        # Prepare the folder where the memmap will be dumped
+        memmap_folder = "/scratch" if os.access("/scratch", os.W_OK) else config["GENERAL"]["OUTPUT"]
+        
+        # Use joblib to parallelize the work
+        max_nbytes = None  # max array size before memory mapping is triggered (None = disabled memory mapping, see https://github.com/scikit-learn-contrib/hdbscan/pull/495#issue-1014324032)
+        chunk_size = max(1, nbins // (config["GENERAL"]["NCPU"]))
+        chunks = [range(i, min(i + chunk_size, nbins)) for i in range(0, nbins, chunk_size)]
+        parallel_configs = {"n_jobs": config["GENERAL"]["NCPU"], "max_nbytes": max_nbytes, "mmap_mode": "c", "temp_folder":memmap_folder}
+        ppxf_tmp = Parallel(**parallel_configs)(delayed(worker)(chunk) for chunk in chunks)
 
-        # send stop signal to stop iteration
-        for _ in range(config["GENERAL"]["NCPU"]):
-            inQueue.put("STOP")
-
-        # stop processes
-        for p in ps:
-            p.join()
-
-        # Get output
-        index = np.zeros(nbins)
-        for i in range(0, nbins):
-            index[i] = ls_tmp[i][0]
-            ls_indices[i, :] = ls_tmp[i][1]
-            ls_errors[i, :] = ls_tmp[i][2]
+        # Flatten the results
+        ppxf_tmp = [result for chunk_results in ppxf_tmp for result in chunk_results]
+        
+        for i in range(0, nbins): 
+            ls_indices[i, :], ls_errors[i, :], *extra = ppxf_tmp[i]
             if MCMC == True:
-                vals[i, :] = ls_tmp[i][3]
-                percentile[i, :, :] = ls_tmp[i][4]
-
-        # Sort output
-        argidx = np.argsort(index)
-        ls_indices = ls_indices[argidx, :]
-        ls_errors = ls_errors[argidx, :]
-        if MCMC == True:
-            vals = vals[argidx, :]
-            percentile = percentile[argidx, :, :]
-
+                vals[i, :], percentile[i, :, :] = extra
+            
         printStatus.updateDone(
             "Running lineStrengths in parallel mode", progressbar=True
         )

@@ -6,6 +6,34 @@ from astropy.io import fits
 from printStatus import printStatus
 
 
+def generate_spatial_mask(config, cube):
+    """
+    Generates a spatial mask for the input cube based on defunct spaxels, signal-to-noise ratio threshold,
+    and an additional mask file provided in the configuration.
+
+    Parameters:
+    config (dict): Configuration settings for the spatial masking.
+    cube (dict): Input cube containing 'snr', 'signal', and other necessary data.
+
+    Returns:
+    None
+    """
+    # Mask defunct spaxels
+    masked_defunct = mask_defunct_spaxels(cube)
+
+    # Apply signal-to-noise ratio threshold
+    masked_snr = apply_snr_threshold(cube["snr"], cube["signal"], config["SPATIAL_MASKING"]["MIN_SNR"])
+
+    # Apply additional mask file
+    masked_mask = apply_mask_file(config, cube)
+
+    # Combine all masks
+    combined_mask = np.logical_or.reduce((masked_defunct, masked_snr, masked_mask))
+
+    # Save the combined mask
+    save_mask(combined_mask, masked_defunct, masked_snr, masked_mask, config)
+
+
 def generateSpatialMask(config, cube):
     """
     Default implementation of the spatialMasking module.
@@ -49,17 +77,20 @@ def maskDefunctSpaxels(cube):
     Mask defunct spaxels, in particular those containing np.nan's or have a
     negative median.
     """
+    spec = cube["spec"]
+    
     # Select defunct spaxels
     idx_good = np.where(
-        np.logical_and(
-            np.all(np.isnan(cube["spec"]) == False, axis=0),
-            np.nanmedian(cube["spec"], axis=0) > 0.0,
+        ~np.logical_or(
+            np.any(np.isnan(spec), axis=0),
+            np.nanmedian(spec, axis=0) <= 0.0,
         )
     )[0]
+
     idx_bad = np.where(
         np.logical_or(
-            np.any(np.isnan(cube["spec"]) == True, axis=0),
-            np.nanmedian(cube["spec"], axis=0) <= 0.0,
+            np.any(np.isnan(spec), axis=0),
+            np.nanmedian(spec, axis=0) <= 0.0,
         )
     )[0]
 
@@ -67,12 +98,10 @@ def maskDefunctSpaxels(cube):
         "Masking defunct spaxels: " + str(len(idx_bad)) + " spaxels are rejected."
     )
 
-    masked = np.zeros(len(cube["snr"]), dtype=bool)
+    masked = np.ones(len(cube["snr"]), dtype=bool)
     masked[idx_good] = False
-    masked[idx_bad] = True
 
     return masked
-
 
 def applySNRThreshold(snr, signal, min_snr, threshold_method="isophote"):
     """
@@ -103,6 +132,7 @@ def applySNRThreshold(snr, signal, min_snr, threshold_method="isophote"):
     masked[idx_inside] = False
     masked[idx_outside] = True
 
+    return masked
     return masked
 
 

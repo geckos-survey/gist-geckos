@@ -1,13 +1,12 @@
 import logging
 import os
 
-import numpy as np
 import extinction
+import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
-from printStatus import printStatus
-
 from gistPipeline.readData import der_snr as der_snr
+from printStatus import printStatus
 
 
 # ======================================
@@ -28,6 +27,7 @@ def set_debug(cube, xext, yext):
 
     return cube
 
+
 # ======================================
 # Helper routine from PHANGS DAP
 # ======================================
@@ -36,6 +36,7 @@ def reshape_extintion_curve(extinction_curve, cube):
     new_shape = extinction_curve.shape + (1,) * extra_dims
     reshaped_extinction_curve = extinction_curve.reshape(new_shape)
     return reshaped_extinction_curve
+
 
 # ======================================
 # Routine to load MUSE-cubes
@@ -48,32 +49,32 @@ def readCube(config):
     logging.info("Reading the MUSE-WFM cube: " + config["GENERAL"]["INPUT"])
 
     # Reading the cube
-    hdu = fits.open(config["GENERAL"]["INPUT"])
-    if len(hdu) == 1:
-        ihdu = 0
-        printStatus.running("data in first HDU")
-    else:
-        ihdu = 1
+    with fits.open(config["GENERAL"]["INPUT"], memmap=True, lazy_load_hdus=True) as hdu:
+        if len(hdu) == 1:
+            ihdu = 0
+            printStatus.running("data in first HDU")
+        else:
+            ihdu = 1
 
-    hdr = hdu[ihdu].header
-    data = hdu[ihdu].data
-    s = np.shape(data)
-    spec = np.reshape(data, [s[0], s[1] * s[2]])
+        hdr = hdu[ihdu].header
+        data = hdu[ihdu].data
+        s = np.shape(data)
+        spec = np.reshape(data, [s[0], s[1] * s[2]])
 
-    wcshdr = WCS(hdr).to_header()
+        wcshdr = WCS(hdr).to_header()
 
-    # Read the variance spectra if available. Otherwise estimate the variance with the der_snr algorithm
-    if len(hdu) >= 3:
-        logging.info("Reading the error (variance) spectra from the cube")
-        stat = hdu[2].data
-        espec = np.reshape(stat, [s[0], s[1] * s[2]])
-    elif len(hdu) <= 2:
-        logging.info(
-            "No error (variance) extension found. Estimating the variance spectra with the der_snr algorithm"
-        )
-        espec = np.zeros(spec.shape)
-        for i in range(0, spec.shape[1]):
-            espec[:, i] = der_snr.der_snr(spec[:, i])
+        # Read the variance spectra if available. Otherwise estimate the variance with the der_snr algorithm
+        if len(hdu) >= 3:
+            logging.info("Reading the error (variance) spectra from the cube")
+            stat = hdu[2].data
+            espec = np.reshape(stat, [s[0], s[1] * s[2]])
+        elif len(hdu) <= 2:
+            logging.info(
+                "No error (variance) extension found. Estimating the variance spectra with the der_snr algorithm"
+            )
+            espec = np.zeros(spec.shape)
+            for i in range(0, spec.shape[1]):
+                espec[:, i] = der_snr.der_snr(spec[:, i])
 
     # Getting the wavelength info
     if "CD3_3" not in hdr.keys():
@@ -87,18 +88,19 @@ def readCube(config):
     wave = hdr["CRVAL3"] + (np.arange(s[0])) * cdelt3
 
     # Correct spectra for Galactic extinction (taken from PHANGS DAP)
-    if config['READ_DATA']['EBmV'] is not None:
+    if config["READ_DATA"]["EBmV"] is not None:
         Rv = 3.1
-        Av = Rv * config['READ_DATA']['EBmV']
+        Av = Rv * config["READ_DATA"]["EBmV"]
         ones = np.ones_like(wave)
         extinction_curve = extinction.apply(extinction.ccm89(wave, Av, Rv), ones)
-        reshaped_extinction_curve = reshape_extintion_curve(extinction_curve, spec) #spec may need to be 'data'
-        spec = spec / reshaped_extinction_curve # spec may need to be data
+        reshaped_extinction_curve = reshape_extintion_curve(
+            extinction_curve, spec
+        )  # spec may need to be 'data'
+        spec = spec / reshaped_extinction_curve  # spec may need to be data
         espec = espec / reshaped_extinction_curve
     else:
-        spec = spec #Don't do anything to the spectra if no dust value given
+        spec = spec  # Don't do anything to the spectra if no dust value given
         espec = espec
-
 
     # Getting the spatial coordinates
     origin = [
@@ -180,7 +182,9 @@ def readCube(config):
     if config["READ_DATA"]["DEBUG"] == True:
         cube = set_debug(cube, s[2], s[1])
 
-    printStatus.updateDone("Done reading "+ str(len(cube["x"])) + " spectra from the MUSE-WFM cube")
+    printStatus.updateDone(
+        "Done reading " + str(len(cube["x"])) + " spectra from the MUSE-WFM cube"
+    )
 
     logging.info(
         "Finished reading the MUSE cube! Read a total of "

@@ -41,10 +41,10 @@ def continuumCube_Module(config):
             os.path.dirname(os.path.realpath(__file__))
             + "/"
             + config["CONT"]["METHOD"]
-            + ".py",
+            + "_cont_wrapper.py",
         )
         logging.info(
-            "Using the continuumCube routine '" + config["CONT"]["METHOD"] + ".py'"
+            "Using the continuumCube routine '" + config["CONT"]["METHOD"] + "_cont_wrapper.py'"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -53,7 +53,7 @@ def continuumCube_Module(config):
         message = (
             "Failed to import the continuumCube routine '"
             + config["CONT"]["METHOD"]
-            + ".py'"
+            + "_cont_wrapper.py'"
         )
         printStatus.failed(message)
         logging.critical(message)
@@ -66,7 +66,7 @@ def continuumCube_Module(config):
     except Exception as e:
         logging.critical(e, exc_info=True)
         message = (
-            "continuumCube routine '" + config["CONT"]["METHOD"] + ".py' failed."
+            "continuumCube routine '" + config["CONT"]["METHOD"] + "_cont_wrapper.py' failed."
         )
         printStatus.failed(message + " See LOGFILE for further information.")
         logging.critical(message)

@@ -24,9 +24,9 @@ def prepareSpectra_Module(config, cube):
     )
     if (
         config["GENERAL"]["OW_OUTPUT"] == False
-        and os.path.isfile(outputPrefix + "_AllSpectra.fits") == True
-        and os.path.isfile(outputPrefix + "_BinSpectra.fits") == True
-        and os.path.isfile(outputPrefix + "_BinSpectra_linear.fits") == True
+        and os.path.isfile(outputPrefix + "_AllSpectra.hdf5") == True
+        and os.path.isfile(outputPrefix + "_BinSpectra.hdf5") == True
+        and os.path.isfile(outputPrefix + "_BinSpectra_linear.hdf5") == True
     ):
         logging.info(
             "Results of the module are already in the output directory. Module is skipped."

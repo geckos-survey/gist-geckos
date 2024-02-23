@@ -3,11 +3,11 @@ import logging
 import os
 import time
 
+import h5py
 import numpy as np
 from astropy.io import fits
 from astropy.stats import biweight_location
-from multiprocess import Process, Queue
-# Then use system installed version instead
+from joblib import Parallel, delayed, dump, load
 from ppxf.ppxf import ppxf
 from printStatus import printStatus
 
@@ -47,77 +47,6 @@ def robust_sigma(y, zero=False):
      sigma = np.sqrt(num/(den*(den - 1.0)))  # see note in above reference
 
      return sigma
-
-def workerPPXF(inQueue, outQueue):
-    """
-    Defines the worker process of the parallelisation with multiprocessing.Queue
-    and multiprocessing.Process.
-    """
-
-    for (
-        templates,
-        galaxy,
-        noise,
-        velscale,
-        start,
-        goodPixels_sfh,
-        mom,
-        offset,
-        degree,
-        mdeg,
-        regul_err,
-        doclean,
-        fixed,
-        velscale_ratio,
-        npix,
-        ncomb,
-        nbins,
-        i,
-        optimal_template_in,
-    ) in iter(inQueue.get,'STOP'):
-        (
-            sol,
-            w_row,
-            bestfit,
-            optimal_template,
-            mc_results,
-            formal_error,
-            spectral_mask,
-            snr_postfit,
-        ) = run_ppxf(templates,
-            galaxy,
-            noise,
-            velscale,
-            start,
-            goodPixels_sfh,
-            mom,
-            offset,
-            degree,
-            mdeg,
-            regul_err,
-            doclean,
-            fixed,
-            velscale_ratio,
-            npix,
-            ncomb,
-            nbins,
-            i,
-            optimal_template_in,
-        )
-
-        outQueue.put(
-            (
-                i,
-                sol,
-                w_row,
-                bestfit,
-                optimal_template,
-                mc_results,
-                formal_error,
-                spectral_mask,
-                snr_postfit,
-            )
-        )
 
 def run_ppxf_firsttime(
     templates,
@@ -419,68 +348,41 @@ def save_sfh(
 ):
     """ Save all results to disk. """
 
-    # ========================
-    # SAVE KINEMATICS
-    outfits_sfh = (
-        os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-        + "_sfh.fits"
-    )
+    # Define the output file
+    outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh.fits")
 
-    # Primary HDU
-    priHDU = fits.PrimaryHDU()
+    # Define the columns
+    columns = [
+        fits.Column(name="AGE", format="D", array=mean_result[:, 0]),
+        fits.Column(name="METAL", format="D", array=mean_result[:, 1]),
+        fits.Column(name="ALPHA", format="D", array=mean_result[:, 2]),
+        fits.Column(name="SNR_POSTFIT", format="D", array=snr_postfit[:])
+    ]
 
-    # Table HDU with stellar kinematics
-    cols = []
-    cols.append(fits.Column(name="AGE", format="D", array=mean_result[:, 0]))
-    cols.append(fits.Column(name="METAL", format="D", array=mean_result[:, 1]))
-    cols.append(fits.Column(name="ALPHA", format="D", array=mean_result[:, 2]))
-
-    if config["SFH"]["FIXED"] == False:
-        cols.append(fits.Column(name="V", format="D", array=kin[:, 0]))
-        cols.append(fits.Column(name="SIGMA", format="D", array=kin[:, 1]))
-        if np.any(kin[:, 2]) != 0:
-            cols.append(fits.Column(name="H3", format="D", array=kin[:, 2]))
-        if np.any(kin[:, 3]) != 0:
-            cols.append(fits.Column(name="H4", format="D", array=kin[:, 3]))
-        if np.any(kin[:, 4]) != 0:
-            cols.append(fits.Column(name="H5", format="D", array=kin[:, 4]))
-        if np.any(kin[:, 5]) != 0:
-            cols.append(fits.Column(name="H6", format="D", array=kin[:, 5]))
-
-        cols.append(
-            fits.Column(name="FORM_ERR_V", format="D", array=formal_error[:, 0])
-        )
-        cols.append(
+    if not config["SFH"]["FIXED"]:
+        columns.extend([
+            fits.Column(name="V", format="D", array=kin[:, 0]),
+            fits.Column(name="SIGMA", format="D", array=kin[:, 1]),
+            fits.Column(name="FORM_ERR_V", format="D", array=formal_error[:, 0]),
             fits.Column(name="FORM_ERR_SIGMA", format="D", array=formal_error[:, 1])
-        )
-        if np.any(formal_error[:, 2]) != 0:
-            cols.append(
-                fits.Column(name="FORM_ERR_H3", format="D", array=formal_error[:, 2])
-            )
-        if np.any(formal_error[:, 3]) != 0:
-            cols.append(
-                fits.Column(name="FORM_ERR_H4", format="D", array=formal_error[:, 3])
-            )
-        if np.any(formal_error[:, 4]) != 0:
-            cols.append(
-                fits.Column(name="FORM_ERR_H5", format="D", array=formal_error[:, 4])
-            )
-        if np.any(formal_error[:, 5]) != 0:
-            cols.append(
-                fits.Column(name="FORM_ERR_H6", format="D", array=formal_error[:, 5])
-            )
+        ])
 
-    # Add True SNR calculated from residual
-    cols.append(fits.Column(name="SNR_POSTFIT", format="D", array=snr_postfit[:]))
+        for i in range(2, 6):
+            if np.any(kin[:, i]) != 0:
+                columns.append(fits.Column(name=f"H{i+1}", format="D", array=kin[:, i]))
+            if np.any(formal_error[:, i]) != 0:
+                columns.append(fits.Column(name=f"FORM_ERR_H{i+1}", format="D", array=formal_error[:, i]))
 
+    # Create the HDUs
+    priHDU = fits.PrimaryHDU()
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(columns), name="SFH")
 
-    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    dataHDU.name = "SFH"
-
-    # Create HDU list and write to file
+    # Save the configuration to the headers
     priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
     dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
+
+    # Create HDU list and write to file
     HDUList = fits.HDUList([priHDU, dataHDU])
     HDUList.writeto(outfits_sfh, overwrite=True)
 
@@ -489,45 +391,32 @@ def save_sfh(
 
     # ========================
     # SAVE WEIGHTS AND GRID
-    outfits_sfh = (
-        os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-        + "_sfh-weights.fits"
-    )
+    # Define the output file
+    outfits_sfh = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_sfh-weights.fits"
     printStatus.running("Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh-weights.fits")
 
     # Primary HDU
     priHDU = fits.PrimaryHDU()
 
     # Table HDU with weights
-    cols = []
-    cols.append(
-        fits.Column(name="WEIGHTS", format=str(w_row.shape[1]) + "D", array=w_row)
-    )
-    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    dataHDU.name = "WEIGHTS"
+    cols_weights = [fits.Column(name="WEIGHTS", format=str(w_row.shape[1]) + "D", array=w_row)]
+    dataHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_weights), name="WEIGHTS")
 
-    logAge_row = np.reshape(logAge_grid, ncomb)
-    metal_row = np.reshape(metal_grid, ncomb)
-    alpha_row = np.reshape(alpha_grid, ncomb)
+    # Reshape the grids
+    logAge_row, metal_row, alpha_row = map(np.reshape, [logAge_grid, metal_grid, alpha_grid], [ncomb]*3)
 
     # Table HDU with grids
-    cols = []
-    cols.append(fits.Column(name="LOGAGE", format="D", array=logAge_row))
-    cols.append(fits.Column(name="METAL", format="D", array=metal_row))
-    cols.append(fits.Column(name="ALPHA", format="D", array=alpha_row))
-    gridHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols))
-    gridHDU.name = "GRID"
+    cols_grid = [fits.Column(name=name, format="D", array=array) 
+                 for name, array in zip(["LOGAGE", "METAL", "ALPHA"], [logAge_row, metal_row, alpha_row])]
+    gridHDU = fits.BinTableHDU.from_columns(fits.ColDefs(cols_grid), name="GRID")
 
     # Create HDU list and write to file
-    priHDU = _auxiliary.saveConfigToHeader(priHDU, config["SFH"])
-    dataHDU = _auxiliary.saveConfigToHeader(dataHDU, config["SFH"])
-    gridHDU = _auxiliary.saveConfigToHeader(gridHDU, config["SFH"])
-    HDUList = fits.HDUList([priHDU, dataHDU, gridHDU])
+    HDUList = fits.HDUList([_auxiliary.saveConfigToHeader(hdu, config["SFH"]) for hdu in [priHDU, dataHDU, gridHDU]])
     HDUList.writeto(outfits_sfh, overwrite=True)
 
-    fits.setval(outfits_sfh, "NAGES", value=nAges)
-    fits.setval(outfits_sfh, "NMETAL", value=nMetal)
-    fits.setval(outfits_sfh, "NALPHA", value=nAlpha)
+    # Set additional header values
+    for name, value in zip(["NAGES", "NMETAL", "NALPHA"], [nAges, nMetal, nAlpha]):
+        fits.setval(outfits_sfh, name, value=value)
 
     printStatus.updateDone(
         "Writing: " + config["GENERAL"]["RUN_ID"] + "_sfh-weights.fits"
@@ -594,16 +483,20 @@ def extractStarFormationHistories(config):
     constructed. The stellar kinematics can or cannot be fixed to those obtained
     with a run of unregularized pPXF and the analysis started.  Results are
     saved to disk and the plotting routines called.
+    Args:
+    - config: dictionary containing configuration parameters
     """
 
     # Read LSF information
     LSF_Data, LSF_Templates = _auxiliary.getLSF(config, "SFH")
 
     # Prepare template library
-    velscale = fits.open(
-        os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-        + "_BinSpectra.fits"
-    )[0].header["VELSCALE"]
+    
+    # Open the HDF5 file
+    with h5py.File(os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_BinSpectra.hdf5", 'r') as f:
+        # Read the VELSCALE attribute from the file
+        velscale = f.attrs['VELSCALE']
+        
     velscale_ratio = 2
 
     (
@@ -630,63 +523,58 @@ def extractStarFormationHistories(config):
     )
     templates = templates.reshape( (templates.shape[0], ntemplates) )
 
+    # Define file paths
+    gas_cleaned_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + '_gas-cleaned_'+config['GAS']['LEVEL']+'.fits'
+    bin_spectra_file = os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"]) + "_BinSpectra.hdf5"
 
-    # Read spectra
-    if (
-        os.path.isfile(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + '_gas-cleaned_'+config['GAS']['LEVEL']+'.fits'
-        )
-        == True
-    ):
-        logging.info(
-            "Using emission-subtracted spectra at "
-            + os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + '_gas-cleaned_'+config['GAS']['LEVEL']+'.fits'
-        )
+    # Check if emission-subtracted spectra file exists
+    if os.path.isfile(gas_cleaned_file):
+        logging.info(f"Using emission-subtracted spectra at {gas_cleaned_file}")
         printStatus.done("Using emission-subtracted spectra")
+        # Open the FITS file
+        with fits.open(gas_cleaned_file, mem_map=True) as hdul:
+            # Read the LOGLAM data from the file
+            logLam = hdul[2].data['LOGLAM']
 
-        hdu = fits.open(
-            os.path.join(config['GENERAL']['OUTPUT'],
-            config['GENERAL']['RUN_ID'])+'_gas-cleaned_'+config['GAS']['LEVEL']+'.fits'
-        )
-        # Adding a bit in to also load the BinSpectra.fits to grab the error spectrum, even if using the cleaned gas specrum
-        # But sometimes this isn't always the right shape. So really, you want the error saved to the _gas_cleaned_BIN.fits hdu
-        #hdu2 = fits.open(os.path.join(config['GENERAL']['OUTPUT'],config['GENERAL']['RUN_ID'])+'_BinSpectra.fits')
+            # Select the indices where the wavelength is within the specified range
+            idx_lam = np.where(np.logical_and(np.exp(logLam) > config['SFH']['LMIN'], np.exp(logLam) < config['SFH']['LMAX']))[0]
 
+            # Read the SPEC and ESPEC data from the file, only for the selected indices
+            galaxy = hdul[1].data['SPEC'][:, idx_lam]
+            bin_data = hdul[1].data['SPEC'].T[idx_lam, :]
+            bin_err = hdul[1].data['ESPEC'].T[idx_lam, :]
+            logLam = logLam[idx_lam]
     else:
-        logging.info(
-            "Using regular spectra without any emission-correction at "
-            + os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_BinSpectra.fits"
-        )
+        logging.info(f"Using regular spectra without any emission-correction at {bin_spectra_file}")
         printStatus.done("Using regular spectra without any emission-correction")
-        hdu = fits.open(
-            os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_BinSpectra.fits"
-        )
+        with h5py.File(bin_spectra_file, 'r') as f:
+            # Read the LOGLAM data from the file
+            logLam = f['LOGLAM'][:]
 
-    galaxy = np.array( hdu[1].data.SPEC )
-    logLam = hdu[2].data.LOGLAM
-    idx_lam = np.where( np.logical_and( np.exp(logLam) > config['SFH']['LMIN'], np.exp(logLam) < config['SFH']['LMAX'] ) )[0]
-    galaxy = galaxy[:,idx_lam]
-    #galaxy = galaxy/np.median(galaxy) # Amelia added to normalise normalize flux. Do we use this again?
-    logLam = logLam[idx_lam]
+            # Select the indices where the wavelength is within the specified range
+            idx_lam = np.where(np.logical_and(np.exp(logLam) > config['SFH']['LMIN'], np.exp(logLam) < config['SFH']['LMAX']))[0]
+
+            # Read the SPEC and ESPEC data from the file, only for the selected indices
+            galaxy = f['SPEC'][:, idx_lam].T
+            bin_data = f['SPEC'][idx_lam, :]
+            bin_err = f['ESPEC'][idx_lam, :]
+            logLam = logLam[idx_lam]
+
+    # Define additional variables
     nbins = galaxy.shape[0]
     npix = galaxy.shape[1]
-    ubins = np.arange(0, nbins)
+    ubins = np.arange(nbins)
     noise = np.full(npix, config['SFH']['NOISE'])
     dv = (np.log(lamRange_temp[0]) - logLam[0])*C
-    #bin_err = np.array( hdu2[1].data.ESPEC.T ) #This will almost certainly not work, as galaxy array isn't transposed
-    bin_err = np.array( hdu[1].data.ESPEC.T ) #This will almost certainly not work, as galaxy array isn't transposed. Does this still need to be transposed?
-    bin_data = np.array( hdu[1].data.SPEC.T ) # Amelia this doens't bode well
-    bin_data = bin_data[idx_lam,:]
-    bin_err = bin_err[idx_lam,:]
+
+    # Apply the selection to the logLam array
+
+
     # Last preparatory steps
     offset = (logLam_template[0] - logLam[0])*C
-    #noise = np.ones((npix,nbins))
-    noise = bin_err # is actual noise, not variance
+    noise = bin_err  # is actual noise, not variance
     nsims = config['SFH']['MC_PPXF']
+
 
     # Implementation of switch FIXED
     # Do fix kinematics to those obtained previously
@@ -698,7 +586,7 @@ def extractStarFormationHistories(config):
         # Read PPXF results
         ppxf_data = fits.open(
             os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])
-            + "_kin.fits"
+            + "_kin.fits", mem_map=True
         )[1].data
         start = np.zeros((nbins, config["KIN"]["MOM"]))
         for i in range(nbins):
@@ -770,24 +658,27 @@ def extractStarFormationHistories(config):
         printStatus.running("Running PPXF in parallel mode")
         logging.info("Running PPXF in parallel mode")
 
-        # Create Queues
-        inQueue = Queue()
-        outQueue = Queue()
+        # Prepare the folder where the memmap will be dumped
+        memmap_folder = "/scratch" if os.access("/scratch", os.W_OK) else config["GENERAL"]["OUTPUT"]
 
-        # Create worker processes
-        ps = [
-            Process(target=workerPPXF, args=(inQueue, outQueue))
-            for _ in range(config["GENERAL"]["NCPU"])
-        ]
+        # dump the arrays and load as memmap
+        templates_filename_memmap = memmap_folder + "/templates_memmap.tmp"
+        dump(templates, templates_filename_memmap)
+        templates = load(templates_filename_memmap, mmap_mode='r')
+        
+        bin_data_filename_memmap = memmap_folder + "/bin_data_memmap.tmp"
+        dump(bin_data, bin_data_filename_memmap)
+        bin_data = load(bin_data_filename_memmap, mmap_mode='r')
+        
+        noise_filename_memmap = memmap_folder + "/noise_memmap.tmp"
+        dump(noise, noise_filename_memmap)
+        noise = load(noise_filename_memmap, mmap_mode='r')
 
-        # Start worker processes
-        for p in ps:
-            p.start()
-
-        # Fill the queue
-        for i in range(nbins):
-            inQueue.put(
-                (
+        # Define a function to encapsulate the work done in the loop
+        def worker(chunk, templates):
+            results = []
+            for i in chunk:
+                result = run_ppxf(
                     templates,
                     bin_data[:,i],
                     noise[:,i],
@@ -808,44 +699,29 @@ def extractStarFormationHistories(config):
                     i,
                     optimal_template_comb,
                 )
-            )
+                results.append(result)
+            return results
 
+        # Use joblib to parallelize the work
+        max_nbytes = "1M" # max array size before memory mapping is triggered
+        chunk_size = max(1, nbins // (config["GENERAL"]["NCPU"]))
+        chunks = [range(i, min(i + chunk_size, nbins)) for i in range(0, nbins, chunk_size)]
+        parallel_configs = {"n_jobs": config["GENERAL"]["NCPU"], "max_nbytes": max_nbytes, "temp_folder": memmap_folder, "mmap_mode": "c"}
+        ppxf_tmp = Parallel(**parallel_configs)(delayed(worker)(chunk, templates) for chunk in chunks)
 
-        # now get the results with indices
-        ppxf_tmp = [outQueue.get() for _ in range(nbins)]
+        # Flatten the results
+        ppxf_tmp = [result for chunk_results in ppxf_tmp for result in chunk_results]
 
-        # send stop signal to stop iteration
-        for _ in range(config["GENERAL"]["NCPU"]):
-            inQueue.put("STOP")
-
-        # stop processes
-        for p in ps:
-            p.join()
-
-        # Get output
-        index = np.zeros(nbins)
+        # Unpack results
         for i in range(0, nbins):
-
-            index[i] = ppxf_tmp[i][0]
-            ppxf_result[i,:config['SFH']['MOM']] = ppxf_tmp[i][1]
-            w_row[i,:] = ppxf_tmp[i][2]
-            ppxf_bestfit[i,:] = ppxf_tmp[i][3]
-            optimal_template[i,:] = ppxf_tmp[i][4]
-            mc_results[i,:config['SFH']['MOM']] = ppxf_tmp[i][5]
-            formal_error[i,:config['SFH']['MOM']] = ppxf_tmp[i][6]
-            spectral_mask[i,:] = ppxf_tmp[i][7]
-            snr_postfit[i] = ppxf_tmp[i][8]
-
-        # Sort output
-        argidx = np.argsort( index )
-        ppxf_result = ppxf_result[argidx,:]
-        w_row = w_row[argidx,:]
-        ppxf_bestfit = ppxf_bestfit[argidx,:]
-        optimal_template = optimal_template[argidx,:]
-        mc_results = mc_results[argidx,:]
-        formal_error = formal_error[argidx,:]
-        spectral_mask = spectral_mask[argidx,:]
-        snr_postfit = snr_postfit[argidx]
+            ppxf_result[i,:config['SFH']['MOM']] = ppxf_tmp[i][0]
+            w_row[i,:] = ppxf_tmp[i][1]
+            ppxf_bestfit[i,:] = ppxf_tmp[i][2]
+            optimal_template[i,:] = ppxf_tmp[i][3]
+            mc_results[i,:config['SFH']['MOM']] = ppxf_tmp[i][4]
+            formal_error[i,:config['SFH']['MOM']] = ppxf_tmp[i][5]
+            spectral_mask[i,:] = ppxf_tmp[i][6]
+            snr_postfit[i] = ppxf_tmp[i][7]
 
         printStatus.updateDone("Running PPXF in parallel mode", progressbar=True)
 
@@ -878,7 +754,7 @@ def extractStarFormationHistories(config):
                 ncomb,
                 nbins,
                 i,
-                optimal_template_in,
+                optimal_template_init,
             )
         printStatus.updateDone("Running PPXF in serial mode", progressbar=True)
 

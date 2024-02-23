@@ -6,6 +6,7 @@ import numpy as np
 import scipy.spatial.distance as dist
 from astropy.io import fits
 from printStatus import printStatus
+from scipy.spatial import cKDTree
 from vorbin.voronoi_2d_binning import voronoi_2d_binning
 
 """
@@ -184,23 +185,29 @@ def noBinning(x, y, snr, idx_inside):
 
 def find_nearest_voronoibin(x, y, idx_outside, xNode, yNode):
     """
-    This function determines the nearest Voronoi-bin for all spaxels which do
-    not satisfy the minimum SNR threshold.
+    Find the nearest Voronoi-bin for each spaxel that does not satisfy the minimum SNR threshold.
+    
+    Args:
+    - x (array): x-coordinates of all spaxels
+    - y (array): y-coordinates of all spaxels
+    - idx_outside (array): indices of spaxels which do not satisfy the minimum SNR threshold
+    - xNode (array): x-coordinates of the Voronoi bins
+    - yNode (array): y-coordinates of the Voronoi bins
+    
+    Returns:
+    - closest (array): array of indices representing the nearest Voronoi-bin for each spaxel
     """
-    x = x[idx_outside]
-    y = y[idx_outside]
-    pix_coords = np.concatenate(
-        (x.reshape((len(x), 1)), y.reshape((len(y), 1))), axis=1
-    )
-    bin_coords = np.concatenate(
-        (xNode.reshape((len(xNode), 1)), yNode.reshape((len(yNode), 1))), axis=1
-    )
+    # Create an array of pixel coordinates
+    pix_coords = np.column_stack((x[idx_outside], y[idx_outside]))
+    # Create an array of bin coordinates
+    bin_coords = np.column_stack((xNode, yNode))
 
-    dists = dist.cdist(pix_coords, bin_coords, "euclidean")
-    closest = np.argmin(dists, axis=1)
+    # Build a KDTree from the bin coordinates
+    tree = cKDTree(bin_coords)
+    # Query the nearest bin for each pixel
+    closest = tree.query(pix_coords, k=1, workers=-1)[1]
 
     return closest
-
 
 def save_table(
     config,
@@ -220,6 +227,24 @@ def save_table(
     """
     Save all relevant information about the Voronoi binning to disk. In
     particular, this allows to later match spaxels and their corresponding bins.
+
+    Args:
+        config (dict): Configuration settings.
+        x (ndarray): X-coordinates of the spaxels.
+        y (ndarray): Y-coordinates of the spaxels.
+        signal (ndarray): Flux values of the spaxels.
+        snr (ndarray): Signal-to-noise ratio values of the spaxels.
+        binNum_new (ndarray): Array of bin IDs for each spaxel.
+        ubins (ndarray): Unique bin IDs.
+        xNode (ndarray): X-coordinates of the bin nodes.
+        yNode (ndarray): Y-coordinates of the bin nodes.
+        sn (ndarray): Signal-to-noise ratio values of the bins.
+        nPixels (ndarray): Number of spaxels in each bin.
+        pixelsize (float): Size of each pixel.
+        wcshdr (Header): WCS header information.
+
+    Returns:
+        None
     """
     outfits_table = (
         os.path.join(config["GENERAL"]["OUTPUT"], config["GENERAL"]["RUN_ID"])

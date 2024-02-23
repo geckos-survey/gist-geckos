@@ -41,12 +41,12 @@ def starFormationHistories_Module(config):
             os.path.dirname(os.path.realpath(__file__))
             + "/"
             + config["SFH"]["METHOD"]
-            + ".py",
+            + "_sfh_wrapper.py",
         )
         logging.info(
             "Using the starFormationHistories routine '"
             + config["SFH"]["METHOD"]
-            + ".py'"
+            + "_sfh_wrapper.py'"
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -55,7 +55,7 @@ def starFormationHistories_Module(config):
         message = (
             "Failed to import the starFormationHistories routine '"
             + config["SFH"]["METHOD"]
-            + ".py'"
+            + "_sfh_wrapper.py'"
         )
         printStatus.failed(message)
         logging.critical(message)
@@ -70,7 +70,7 @@ def starFormationHistories_Module(config):
         message = (
             "starFormationHistories routine '"
             + config["SFH"]["METHOD"]
-            + ".py' failed."
+            + "_sfh_wrapper.py' failed."
         )
         printStatus.failed(message + " See LOGFILE for further information.")
         logging.critical(message)
